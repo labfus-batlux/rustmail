@@ -1,5 +1,5 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use super::app::{App, ComposeField, EditMode, Folder, View};
+use super::app::{App, ComposeField, EditMode, Folder, View, VimOperator};
 
 pub enum Action {
     None,
@@ -9,6 +9,7 @@ pub enum Action {
     ArchiveEmail,
     MarkAsRead(u32),
     ChangeFolder(Folder),
+    FetchThread,
 }
 
 pub fn handle_key_event(app: &mut App, key: KeyEvent, view_height: u16) -> Action {
@@ -66,6 +67,14 @@ fn handle_inbox_keys(app: &mut App, key: KeyEvent) -> Action {
         }
         
         // Navigation
+        KeyCode::Char('J') => {
+            app.select_next_with_selection();
+            Action::None
+        }
+        KeyCode::Char('K') => {
+            app.select_previous_with_selection();
+            Action::None
+        }
         KeyCode::Char('j') | KeyCode::Down => {
             app.select_next();
             Action::None
@@ -123,6 +132,22 @@ fn handle_inbox_keys(app: &mut App, key: KeyEvent) -> Action {
             app.toggle_star();
             Action::None
         }
+        KeyCode::Char('x') => {
+            app.toggle_selection();
+            Action::None
+        }
+        KeyCode::Esc => {
+            if !app.selected.is_empty() {
+                app.clear_selection();
+            }
+            Action::None
+        }
+        
+        // Importance filter
+        KeyCode::Char('I') => {
+            app.cycle_importance_filter();
+            Action::None
+        }
         
         // Refresh
         KeyCode::Char('R') => Action::Refresh,
@@ -138,6 +163,7 @@ fn handle_inbox_keys(app: &mut App, key: KeyEvent) -> Action {
         // Command palette
         KeyCode::Char(':') => {
             app.command = Default::default();
+            app.command.update_suggestions();
             app.view = View::Command;
             Action::None
         }
@@ -179,11 +205,11 @@ fn handle_email_view_keys(app: &mut App, key: KeyEvent, view_height: u16) -> Act
         // Reply/Forward
         (_, KeyCode::Char('r')) => {
             app.start_reply(false);
-            Action::None
+            Action::FetchThread
         }
         (_, KeyCode::Char('a')) => {
             app.start_reply(true);
-            Action::None
+            Action::FetchThread
         }
         (_, KeyCode::Char('f')) => {
             app.start_forward();
@@ -256,55 +282,76 @@ fn handle_search_keys(app: &mut App, key: KeyEvent) -> Action {
     }
 }
 
+fn execute_command(app: &mut App, cmd: &str) -> Action {
+    match cmd {
+        "q" | "quit" => {
+            app.should_quit = true;
+            Action::None
+        }
+        "refresh" | "r" => {
+            Action::Refresh
+        }
+        "inbox" => {
+            app.clear_search_filter();
+            Action::ChangeFolder(Folder::Inbox)
+        }
+        "sent" => {
+            app.clear_search_filter();
+            Action::ChangeFolder(Folder::Sent)
+        }
+        "drafts" => {
+            app.clear_search_filter();
+            Action::ChangeFolder(Folder::Drafts)
+        }
+        "trash" => {
+            app.clear_search_filter();
+            Action::ChangeFolder(Folder::Trash)
+        }
+        "archive" => {
+            app.clear_search_filter();
+            Action::ChangeFolder(Folder::Archive)
+        }
+        _ => {
+            app.notify_error(&format!("Unknown command: {}", cmd));
+            Action::None
+        }
+    }
+}
+
 fn handle_command_keys(app: &mut App, key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Esc => {
+            app.command = Default::default();
             app.view = View::Inbox;
             Action::None
         }
         KeyCode::Enter => {
-            let cmd = app.command.input.trim().to_lowercase();
+            let cmd = if let Some(selected) = app.command.get_selected_command() {
+                selected.to_string()
+            } else {
+                app.command.input.trim().to_lowercase()
+            };
             app.view = View::Inbox;
-            
-            match cmd.as_str() {
-                "q" | "quit" => {
-                    app.should_quit = true;
-                }
-                "refresh" | "r" => {
-                    return Action::Refresh;
-                }
-                "inbox" => {
-                    app.clear_search_filter();
-                    return Action::ChangeFolder(Folder::Inbox);
-                }
-                "sent" => {
-                    app.clear_search_filter();
-                    return Action::ChangeFolder(Folder::Sent);
-                }
-                "drafts" => {
-                    app.clear_search_filter();
-                    return Action::ChangeFolder(Folder::Drafts);
-                }
-                "trash" => {
-                    app.clear_search_filter();
-                    return Action::ChangeFolder(Folder::Trash);
-                }
-                "archive" => {
-                    app.clear_search_filter();
-                    return Action::ChangeFolder(Folder::Archive);
-                }
-                _ => {
-                    app.notify_error(&format!("Unknown command: {}", cmd));
-                }
-            }
+            let action = execute_command(app, &cmd);
+            app.command = Default::default();
+            action
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            app.command.select_next();
+            Action::None
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            app.command.select_previous();
             Action::None
         }
         KeyCode::Backspace => {
             app.command.input.pop();
+            app.command.update_suggestions();
             Action::None
         }
         KeyCode::Char(c) => {
             app.command.input.push(c);
+            app.command.update_suggestions();
             Action::None
         }
         _ => Action::None,
@@ -371,28 +418,67 @@ fn handle_compose_insert(app: &mut App, key: KeyEvent) -> Action {
 }
 
 fn handle_compose_normal(app: &mut App, key: KeyEvent) -> Action {
+    let pending_op = app.compose.vim.operator.clone();
+    
     match key.code {
+        // Number prefix for count
+        KeyCode::Char(c @ '1'..='9') => {
+            let digit = c.to_digit(10).unwrap() as usize;
+            app.compose.vim.count = Some(app.compose.vim.count.unwrap_or(0) * 10 + digit);
+            Action::None
+        }
+        KeyCode::Char('0') if app.compose.vim.count.is_some() => {
+            app.compose.vim.count = Some(app.compose.vim.count.unwrap() * 10);
+            Action::None
+        }
+        
+        // Operators
+        KeyCode::Char('d') => {
+            if pending_op == VimOperator::Delete {
+                app.delete_current_line();
+                app.reset_vim_state();
+            } else {
+                app.compose.vim.operator = VimOperator::Delete;
+            }
+            Action::None
+        }
+        KeyCode::Char('c') => {
+            if pending_op == VimOperator::Change {
+                app.delete_current_line();
+                app.compose.edit_mode = EditMode::Insert;
+                app.reset_vim_state();
+            } else {
+                app.compose.vim.operator = VimOperator::Change;
+            }
+            Action::None
+        }
+        
         // Enter insert mode
         KeyCode::Char('i') => {
+            app.reset_vim_state();
             app.compose.edit_mode = EditMode::Insert;
             Action::None
         }
         KeyCode::Char('a') => {
+            app.reset_vim_state();
             app.compose.edit_mode = EditMode::Insert;
             app.move_cursor_right();
             Action::None
         }
         KeyCode::Char('A') => {
+            app.reset_vim_state();
             app.compose.edit_mode = EditMode::Insert;
             app.compose.cursor_pos = app.get_current_field().chars().count();
             Action::None
         }
         KeyCode::Char('I') => {
+            app.reset_vim_state();
             app.compose.edit_mode = EditMode::Insert;
             app.compose.cursor_pos = 0;
             Action::None
         }
         KeyCode::Char('o') => {
+            app.reset_vim_state();
             app.compose.edit_mode = EditMode::Insert;
             let len = app.get_current_field().chars().count();
             app.compose.cursor_pos = len;
@@ -400,35 +486,95 @@ fn handle_compose_normal(app: &mut App, key: KeyEvent) -> Action {
             Action::None
         }
         
-        // Movement
+        // Movement (with count support)
         KeyCode::Char('h') | KeyCode::Left => {
-            app.move_cursor_left();
+            let count = app.get_vim_count();
+            for _ in 0..count {
+                app.move_cursor_left();
+            }
+            app.reset_vim_state();
             Action::None
         }
         KeyCode::Char('l') | KeyCode::Right => {
-            app.move_cursor_right();
+            let count = app.get_vim_count();
+            for _ in 0..count {
+                app.move_cursor_right();
+            }
+            app.reset_vim_state();
             Action::None
         }
         KeyCode::Char('w') => {
-            app.move_cursor_word_forward();
+            let count = app.get_vim_count();
+            match pending_op {
+                VimOperator::Delete => {
+                    for _ in 0..count {
+                        app.delete_word_forward();
+                    }
+                }
+                VimOperator::Change => {
+                    for _ in 0..count {
+                        app.delete_word_forward();
+                    }
+                    app.compose.edit_mode = EditMode::Insert;
+                }
+                VimOperator::None => {
+                    for _ in 0..count {
+                        app.move_cursor_word_forward();
+                    }
+                }
+            }
+            app.reset_vim_state();
             Action::None
         }
         KeyCode::Char('b') => {
-            app.move_cursor_word_backward();
+            let count = app.get_vim_count();
+            for _ in 0..count {
+                app.move_cursor_word_backward();
+            }
+            app.reset_vim_state();
+            Action::None
+        }
+        KeyCode::Char('e') => {
+            let count = app.get_vim_count();
+            match pending_op {
+                VimOperator::Delete => {
+                    for _ in 0..count {
+                        app.delete_to_word_end();
+                    }
+                }
+                VimOperator::Change => {
+                    for _ in 0..count {
+                        app.delete_to_word_end();
+                    }
+                    app.compose.edit_mode = EditMode::Insert;
+                }
+                VimOperator::None => {
+                    for _ in 0..count {
+                        app.move_cursor_word_end();
+                    }
+                }
+            }
+            app.reset_vim_state();
             Action::None
         }
         KeyCode::Char('0') => {
             app.compose.cursor_pos = 0;
+            app.reset_vim_state();
             Action::None
         }
         KeyCode::Char('$') => {
             app.compose.cursor_pos = app.get_current_field().chars().count().saturating_sub(1);
+            app.reset_vim_state();
             Action::None
         }
         
         // Editing
         KeyCode::Char('x') => {
-            app.delete_char_at();
+            let count = app.get_vim_count();
+            for _ in 0..count {
+                app.delete_char_at();
+            }
+            app.reset_vim_state();
             Action::None
         }
         
@@ -440,6 +586,7 @@ fn handle_compose_normal(app: &mut App, key: KeyEvent) -> Action {
                 ComposeField::Body => ComposeField::Body,
             };
             app.sync_cursor_to_field();
+            app.reset_vim_state();
             Action::None
         }
         KeyCode::Char('k') | KeyCode::Up => {
@@ -449,16 +596,29 @@ fn handle_compose_normal(app: &mut App, key: KeyEvent) -> Action {
                 ComposeField::Body => ComposeField::Subject,
             };
             app.sync_cursor_to_field();
+            app.reset_vim_state();
             Action::None
         }
         
         // Quit compose
-        KeyCode::Char('q') | KeyCode::Esc => {
+        KeyCode::Char('q') => {
+            app.reset_vim_state();
             app.view = View::Inbox;
             Action::None
         }
+        KeyCode::Esc => {
+            if pending_op != VimOperator::None || app.compose.vim.count.is_some() {
+                app.reset_vim_state();
+            } else {
+                app.view = View::Inbox;
+            }
+            Action::None
+        }
         
-        _ => Action::None,
+        _ => {
+            app.reset_vim_state();
+            Action::None
+        }
     }
 }
 

@@ -87,11 +87,39 @@ pub enum EditMode {
     Insert,
 }
 
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum ImportanceFilter {
+    #[default]
+    All,
+    Important,
+    NotImportant,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum VimOperator {
+    None,
+    Delete,  // d
+    Change,  // c
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct VimState {
+    pub count: Option<usize>,
+    pub operator: VimOperator,
+}
+
+impl Default for VimOperator {
+    fn default() -> Self {
+        VimOperator::None
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct EmailInChain {
     pub from: String,
     pub date: Option<chrono::DateTime<chrono::Utc>>,
     pub body: String,
+    pub message_id: Option<String>,
 }
 
 #[derive(Debug)]
@@ -105,6 +133,9 @@ pub struct ComposeState {
     pub cursor_pos: usize,
     pub reply_chain: Vec<EmailInChain>,
     pub chain_scroll: u16,
+    pub in_reply_to: Option<String>,
+    pub references: Vec<String>,
+    pub vim: VimState,
 }
 
 impl Default for ComposeState {
@@ -119,6 +150,9 @@ impl Default for ComposeState {
             cursor_pos: 0,
             reply_chain: Vec::new(),
             chain_scroll: 0,
+            in_reply_to: None,
+            references: Vec::new(),
+            vim: VimState::default(),
         }
     }
 }
@@ -131,10 +165,59 @@ pub struct SearchState {
     pub active: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct Command {
+    pub name: &'static str,
+    pub description: &'static str,
+}
+
+pub const COMMANDS: &[Command] = &[
+    Command { name: "quit", description: "Exit rustmail" },
+    Command { name: "q", description: "Exit rustmail" },
+    Command { name: "refresh", description: "Refresh emails" },
+    Command { name: "r", description: "Refresh emails" },
+    Command { name: "inbox", description: "Go to Inbox" },
+    Command { name: "sent", description: "Go to Sent" },
+    Command { name: "drafts", description: "Go to Drafts" },
+    Command { name: "trash", description: "Go to Trash" },
+    Command { name: "archive", description: "Go to Archive" },
+];
+
 #[derive(Debug, Default)]
 pub struct CommandState {
     pub input: String,
     pub cursor: usize,
+    pub suggestions: Vec<usize>,
+    pub selected: usize,
+}
+
+impl CommandState {
+    pub fn update_suggestions(&mut self) {
+        let query = self.input.to_lowercase();
+        self.suggestions = COMMANDS
+            .iter()
+            .enumerate()
+            .filter(|(_, cmd)| cmd.name.starts_with(&query) || cmd.description.to_lowercase().contains(&query))
+            .map(|(i, _)| i)
+            .collect();
+        self.selected = 0;
+    }
+
+    pub fn select_next(&mut self) {
+        if !self.suggestions.is_empty() {
+            self.selected = (self.selected + 1) % self.suggestions.len();
+        }
+    }
+
+    pub fn select_previous(&mut self) {
+        if !self.suggestions.is_empty() {
+            self.selected = self.selected.checked_sub(1).unwrap_or(self.suggestions.len() - 1);
+        }
+    }
+
+    pub fn get_selected_command(&self) -> Option<&'static str> {
+        self.suggestions.get(self.selected).map(|&i| COMMANDS[i].name)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -161,6 +244,8 @@ pub struct App {
     pub command: CommandState,
     pub theme: Theme,
     pub starred: std::collections::HashSet<u32>,
+    pub selected: std::collections::HashSet<u32>,
+    pub importance_filter: ImportanceFilter,
 }
 
 impl App {
@@ -182,6 +267,8 @@ impl App {
             command: CommandState::default(),
             theme: Theme::default(),
             starred: std::collections::HashSet::new(),
+            selected: std::collections::HashSet::new(),
+            importance_filter: ImportanceFilter::default(),
         }
     }
 
@@ -203,6 +290,32 @@ impl App {
         self.notification = None;
     }
 
+    pub fn cycle_importance_filter(&mut self) {
+        self.importance_filter = match self.importance_filter {
+            ImportanceFilter::All => ImportanceFilter::Important,
+            ImportanceFilter::Important => ImportanceFilter::NotImportant,
+            ImportanceFilter::NotImportant => ImportanceFilter::All,
+        };
+        self.list_state.select(Some(0));
+        let filter_name = match self.importance_filter {
+            ImportanceFilter::All => "All",
+            ImportanceFilter::Important => "Important",
+            ImportanceFilter::NotImportant => "Not Important",
+        };
+        self.notify(&format!("Filter: {}", filter_name));
+    }
+
+    pub fn filtered_emails(&self) -> Vec<&Email> {
+        self.emails
+            .iter()
+            .filter(|e| match self.importance_filter {
+                ImportanceFilter::All => true,
+                ImportanceFilter::Important => e.important,
+                ImportanceFilter::NotImportant => !e.important,
+            })
+            .collect()
+    }
+
     pub fn toggle_star(&mut self) {
         if let Some(email) = self.selected_email() {
             let uid = email.uid;
@@ -212,6 +325,45 @@ impl App {
                 self.starred.insert(uid);
             }
         }
+    }
+
+    pub fn toggle_selection(&mut self) {
+        if let Some(email) = self.selected_email() {
+            let uid = email.uid;
+            if self.selected.contains(&uid) {
+                self.selected.remove(&uid);
+            } else {
+                self.selected.insert(uid);
+            }
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selected.clear();
+    }
+
+    pub fn select_next_with_selection(&mut self) {
+        if let Some(email) = self.selected_email() {
+            self.selected.insert(email.uid);
+        }
+        self.select_next();
+        if let Some(email) = self.selected_email() {
+            self.selected.insert(email.uid);
+        }
+    }
+
+    pub fn select_previous_with_selection(&mut self) {
+        if let Some(email) = self.selected_email() {
+            self.selected.insert(email.uid);
+        }
+        self.select_previous();
+        if let Some(email) = self.selected_email() {
+            self.selected.insert(email.uid);
+        }
+    }
+
+    pub fn get_selected_uids(&self) -> Vec<u32> {
+        self.selected.iter().copied().collect()
     }
 
     pub fn start_reply(&mut self, reply_all: bool) {
@@ -224,10 +376,21 @@ impl App {
                 format!("Re: {}", email.subject)
             };
             compose.mode = if reply_all { ComposeMode::ReplyAll } else { ComposeMode::Reply };
+            
+            compose.in_reply_to = email.message_id.clone();
+            let mut refs = email.references.clone();
+            if let Some(ref msg_id) = email.message_id {
+                if !refs.contains(msg_id) {
+                    refs.push(msg_id.clone());
+                }
+            }
+            compose.references = refs;
+            
             compose.reply_chain = vec![EmailInChain {
                 from: email.from.clone(),
                 date: email.date,
                 body: email.body.clone(),
+                message_id: email.message_id.clone(),
             }];
             compose.active_field = ComposeField::Body;
             compose.edit_mode = EditMode::Insert;
@@ -235,6 +398,18 @@ impl App {
             self.compose = compose;
             self.view = View::Compose;
         }
+    }
+
+    pub fn set_reply_chain_from_thread(&mut self, thread: Vec<Email>) {
+        self.compose.reply_chain = thread
+            .into_iter()
+            .map(|e| EmailInChain {
+                from: e.from,
+                date: e.date,
+                body: e.body,
+                message_id: e.message_id,
+            })
+            .collect();
     }
 
     pub fn start_forward(&mut self) {
@@ -353,6 +528,106 @@ impl App {
         self.compose.cursor_pos = self.compose.cursor_pos.min(len);
     }
 
+    pub fn delete_word_forward(&mut self) {
+        let field = self.get_current_field();
+        let chars: Vec<char> = field.chars().collect();
+        let start_pos = self.compose.cursor_pos;
+        let mut end_pos = start_pos;
+        
+        while end_pos < chars.len() && !chars[end_pos].is_whitespace() {
+            end_pos += 1;
+        }
+        while end_pos < chars.len() && chars[end_pos].is_whitespace() {
+            end_pos += 1;
+        }
+        
+        if end_pos > start_pos {
+            let field = self.get_current_field_mut();
+            let start_byte: usize = field.chars().take(start_pos).map(|c| c.len_utf8()).sum();
+            let end_byte: usize = field.chars().take(end_pos).map(|c| c.len_utf8()).sum();
+            field.replace_range(start_byte..end_byte, "");
+        }
+    }
+
+    pub fn delete_current_line(&mut self) {
+        if self.compose.active_field != ComposeField::Body {
+            let field = self.get_current_field_mut();
+            field.clear();
+            self.compose.cursor_pos = 0;
+            return;
+        }
+
+        let field = self.get_current_field();
+        let chars: Vec<char> = field.chars().collect();
+        let cursor = self.compose.cursor_pos;
+
+        let mut line_start = cursor;
+        while line_start > 0 && chars.get(line_start - 1) != Some(&'\n') {
+            line_start -= 1;
+        }
+
+        let mut line_end = cursor;
+        while line_end < chars.len() && chars[line_end] != '\n' {
+            line_end += 1;
+        }
+        if line_end < chars.len() {
+            line_end += 1;
+        }
+
+        let field = self.get_current_field_mut();
+        let start_byte: usize = field.chars().take(line_start).map(|c| c.len_utf8()).sum();
+        let end_byte: usize = field.chars().take(line_end).map(|c| c.len_utf8()).sum();
+        field.replace_range(start_byte..end_byte, "");
+        self.compose.cursor_pos = line_start;
+        self.sync_cursor_to_field();
+    }
+
+    pub fn reset_vim_state(&mut self) {
+        self.compose.vim = VimState::default();
+    }
+
+    pub fn get_vim_count(&self) -> usize {
+        self.compose.vim.count.unwrap_or(1)
+    }
+
+    pub fn move_cursor_word_end(&mut self) {
+        let field = self.get_current_field();
+        let chars: Vec<char> = field.chars().collect();
+        let mut pos = self.compose.cursor_pos;
+        
+        if pos < chars.len() {
+            pos += 1;
+        }
+        while pos < chars.len() && chars[pos].is_whitespace() {
+            pos += 1;
+        }
+        while pos < chars.len() && !chars[pos].is_whitespace() {
+            pos += 1;
+        }
+        if pos > 0 {
+            pos -= 1;
+        }
+        self.compose.cursor_pos = pos.min(chars.len().saturating_sub(1));
+    }
+
+    pub fn delete_to_word_end(&mut self) {
+        let field = self.get_current_field();
+        let chars: Vec<char> = field.chars().collect();
+        let start_pos = self.compose.cursor_pos;
+        let mut end_pos = start_pos;
+        
+        while end_pos < chars.len() && !chars[end_pos].is_whitespace() {
+            end_pos += 1;
+        }
+        
+        if end_pos > start_pos {
+            let field = self.get_current_field_mut();
+            let start_byte: usize = field.chars().take(start_pos).map(|c| c.len_utf8()).sum();
+            let end_byte: usize = field.chars().take(end_pos).map(|c| c.len_utf8()).sum();
+            field.replace_range(start_byte..end_byte, "");
+        }
+    }
+
     // Search
     pub fn update_search(&mut self) {
         let matcher = SkimMatcherV2::default();
@@ -387,11 +662,27 @@ impl App {
     }
 
     fn get_visible_indices(&self) -> Vec<usize> {
-        if self.search.active {
+        let base_indices: Vec<usize> = if self.search.active {
             self.search.results.clone()
         } else {
             (0..self.emails.len()).collect()
-        }
+        };
+        
+        // Apply importance filter
+        base_indices
+            .into_iter()
+            .filter(|&i| {
+                if let Some(email) = self.emails.get(i) {
+                    match self.importance_filter {
+                        ImportanceFilter::All => true,
+                        ImportanceFilter::Important => email.important,
+                        ImportanceFilter::NotImportant => !email.important,
+                    }
+                } else {
+                    false
+                }
+            })
+            .collect()
     }
 
     pub fn select_next(&mut self) {
@@ -488,28 +779,38 @@ impl App {
         let items: Vec<ListItem> = visible_indices
             .iter()
             .filter_map(|&i| self.emails.get(i).map(|e| (i, e)))
-            .map(|(idx, email)| {
+            .map(|(_idx, email)| {
                 let is_starred = self.starred.contains(&email.uid);
+                let is_selected = self.selected.contains(&email.uid);
                 let star = if is_starred { "★" } else { " " };
-                let unread_marker = if email.seen { "  " } else { "● " };
+                let important_marker = if email.important { "!" } else { " " };
+                let select_marker = if is_selected { "▌" } else if email.seen { "  " } else { "● " };
                 let time = relative_time(email.date);
                 
                 // Calculate available space for subject
                 let from_width = 22;
                 let time_width = time.chars().count() + 2;
-                let fixed_width = 6 + from_width + time_width;
+                let fixed_width = 7 + from_width + time_width; // +1 for importance marker
                 let subject_width = width.saturating_sub(fixed_width);
                 
-                let style = if email.seen {
+                let style = if is_selected {
+                    Style::default().fg(self.theme.accent).add_modifier(Modifier::BOLD)
+                } else if email.seen {
                     self.theme.text_dim()
                 } else {
                     self.theme.unread()
                 };
 
+                let marker_style = if is_selected {
+                    Style::default().fg(self.theme.accent)
+                } else {
+                    self.theme.accent()
+                };
+
                 ListItem::new(Line::from(vec![
-                    Span::styled(unread_marker, self.theme.accent()),
+                    Span::styled(select_marker, marker_style),
                     Span::styled(star, Style::default().fg(self.theme.warning)),
-                    Span::styled(" ", Style::default()),
+                    Span::styled(important_marker, Style::default().fg(self.theme.error)),
                     Span::styled(format!("{:<width$}", truncate(&email.from, from_width), width = from_width), style),
                     Span::styled(truncate(&email.subject, subject_width), style),
                     Span::styled(format!("  {}", time), self.theme.text_muted()),
@@ -525,10 +826,15 @@ impl App {
         let mut visible_list_state = ListState::default();
         visible_list_state.select(visible_selected);
 
+        let filter_suffix = match self.importance_filter {
+            ImportanceFilter::All => "",
+            ImportanceFilter::Important => " [Important]",
+            ImportanceFilter::NotImportant => " [Not Important]",
+        };
         let title = if self.search.active {
-            format!(" {} · \"{}\" ", self.current_folder.display_name(), self.search.query)
+            format!(" {} · \"{}\"{} ", self.current_folder.display_name(), self.search.query, filter_suffix)
         } else {
-            format!(" {} ", self.current_folder.display_name())
+            format!(" {}{} ", self.current_folder.display_name(), filter_suffix)
         };
 
         let list = List::new(items)
@@ -785,15 +1091,23 @@ impl App {
 
     fn render_command_palette(&self, frame: &mut Frame) {
         let area = frame.area();
-        let width = (area.width as f32 * 0.6) as u16;
+        let width = (area.width as f32 * 0.5) as u16;
+        let suggestion_count = self.command.suggestions.len().min(8) as u16;
+        let height = 3 + suggestion_count;
+        
         let popup = Rect::new(
             (area.width - width) / 2,
             area.height / 4,
             width,
-            3,
+            height,
         );
 
         frame.render_widget(Clear, popup);
+        
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .split(popup);
         
         let input = Paragraph::new(format!(":{}", self.command.input))
             .block(
@@ -801,7 +1115,30 @@ impl App {
                     .borders(Borders::ALL)
                     .border_style(self.theme.accent())
             );
-        frame.render_widget(input, popup);
+        frame.render_widget(input, chunks[0]);
+
+        if !self.command.suggestions.is_empty() {
+            let items: Vec<ListItem> = self.command.suggestions
+                .iter()
+                .enumerate()
+                .map(|(i, &cmd_idx)| {
+                    let cmd = &COMMANDS[cmd_idx];
+                    let style = if i == self.command.selected {
+                        self.theme.selected()
+                    } else {
+                        Style::default()
+                    };
+                    ListItem::new(Line::from(vec![
+                        Span::styled(format!(" :{:<12}", cmd.name), style.add_modifier(Modifier::BOLD)),
+                        Span::styled(cmd.description, self.theme.text_muted()),
+                    ]))
+                })
+                .collect();
+
+            let list = List::new(items)
+                .style(Style::default().bg(self.theme.bg));
+            frame.render_widget(list, chunks[1]);
+        }
     }
 
     fn render_help(&self, frame: &mut Frame) {

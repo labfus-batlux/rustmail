@@ -142,6 +142,8 @@ fn run_app(
                             &app.compose.subject,
                             &app.compose.body,
                             access_token,
+                            app.compose.in_reply_to.as_deref(),
+                            &app.compose.references,
                         ) {
                             Ok(_) => {
                                 app.notify("Sent");
@@ -155,45 +157,57 @@ fn run_app(
                     }
                 }
                 ui::keybindings::Action::ArchiveEmail => {
-                    if let Some(email) = app.selected_email() {
-                        let uid = email.uid;
-                        app.notify("Archiving...");
+                    let uids: Vec<u32> = if app.selected.is_empty() {
+                        app.selected_email().map(|e| e.uid).into_iter().collect()
+                    } else {
+                        app.get_selected_uids()
+                    };
+                    
+                    if !uids.is_empty() {
+                        let count = uids.len();
+                        app.notify(&format!("Archiving {}...", count));
                         terminal.draw(|f| app.render(f))?;
 
-                        match imap_client.archive_email(uid) {
-                            Ok(_) => {
-                                let idx = app.list_state.selected().unwrap_or(0);
-                                app.emails.remove(idx);
-                                if idx >= app.emails.len() && !app.emails.is_empty() {
-                                    app.list_state.select(Some(app.emails.len() - 1));
-                                }
-                                app.notify("Archived");
-                            }
-                            Err(e) => {
-                                app.notify_error(&format!("Archive failed: {}", e));
+                        let mut success = 0;
+                        for uid in &uids {
+                            if imap_client.archive_email(*uid).is_ok() {
+                                success += 1;
                             }
                         }
+                        
+                        app.emails.retain(|e| !uids.contains(&e.uid));
+                        app.clear_selection();
+                        if app.list_state.selected().unwrap_or(0) >= app.emails.len() && !app.emails.is_empty() {
+                            app.list_state.select(Some(app.emails.len() - 1));
+                        }
+                        app.notify(&format!("Archived {}", success));
                     }
                 }
                 ui::keybindings::Action::DeleteEmail => {
-                    if let Some(email) = app.selected_email() {
-                        let uid = email.uid;
-                        app.notify("Deleting...");
+                    let uids: Vec<u32> = if app.selected.is_empty() {
+                        app.selected_email().map(|e| e.uid).into_iter().collect()
+                    } else {
+                        app.get_selected_uids()
+                    };
+                    
+                    if !uids.is_empty() {
+                        let count = uids.len();
+                        app.notify(&format!("Deleting {}...", count));
                         terminal.draw(|f| app.render(f))?;
 
-                        match imap_client.delete_email(uid) {
-                            Ok(_) => {
-                                let idx = app.list_state.selected().unwrap_or(0);
-                                app.emails.remove(idx);
-                                if idx >= app.emails.len() && !app.emails.is_empty() {
-                                    app.list_state.select(Some(app.emails.len() - 1));
-                                }
-                                app.notify("Deleted");
-                            }
-                            Err(e) => {
-                                app.notify_error(&format!("Delete failed: {}", e));
+                        let mut success = 0;
+                        for uid in &uids {
+                            if imap_client.delete_email(*uid).is_ok() {
+                                success += 1;
                             }
                         }
+                        
+                        app.emails.retain(|e| !uids.contains(&e.uid));
+                        app.clear_selection();
+                        if app.list_state.selected().unwrap_or(0) >= app.emails.len() && !app.emails.is_empty() {
+                            app.list_state.select(Some(app.emails.len() - 1));
+                        }
+                        app.notify(&format!("Deleted {}", success));
                     }
                 }
                 ui::keybindings::Action::MarkAsRead(uid) => {
@@ -201,6 +215,15 @@ fn run_app(
                     if let Some(idx) = app.list_state.selected() {
                         if let Some(email) = app.emails.get_mut(idx) {
                             email.seen = true;
+                        }
+                    }
+                }
+                ui::keybindings::Action::FetchThread => {
+                    if let Some(email) = app.selected_email().cloned() {
+                        if !email.references.is_empty() || email.in_reply_to.is_some() {
+                            if let Ok(thread) = imap_client.fetch_thread(&email) {
+                                app.set_reply_chain_from_thread(thread);
+                            }
                         }
                     }
                 }
