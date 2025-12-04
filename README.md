@@ -22,7 +22,7 @@ cargo install --path .
 Or build from source:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/rustmail.git
+git clone https://github.com/labfus-batlux/rustmail.git
 cd rustmail
 cargo build --release
 ./target/release/rustmail
