@@ -6,7 +6,7 @@ use fuzzy_matcher::FuzzyMatcher;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect, Margin},
     style::{Modifier, Style},
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap, Padding},
     Frame,
 };
@@ -603,15 +603,14 @@ impl App {
             vec![
                 Constraint::Length(3),
                 Constraint::Length(3),
-                Constraint::Length(12),
+                Constraint::Min(10),
                 Constraint::Min(5),
             ]
         } else {
             vec![
                 Constraint::Length(3),
                 Constraint::Length(3),
-                Constraint::Min(0),
-                Constraint::Length(0),
+                Constraint::Min(10),
             ]
         };
 
@@ -663,10 +662,53 @@ impl App {
         // Body field
         let body_active = self.compose.active_field == ComposeField::Body;
         let body_style = if body_active { self.theme.accent() } else { self.theme.border() };
-        let body_content = render_field(&self.compose.body, self.compose.cursor_pos, body_active);
-        let body_input = Paragraph::new(Line::from(body_content))
-            .block(Block::default().borders(Borders::ALL).border_style(body_style).title(" Message "))
-            .wrap(Wrap { trim: false });
+        
+        // Build body text with proper multiline support
+        let body_text: Text = if body_active {
+            let body_str = &self.compose.body;
+            let cursor_pos = self.compose.cursor_pos;
+            let chars: Vec<char> = body_str.chars().collect();
+            let pos = cursor_pos.min(chars.len());
+            
+            let mut result_lines: Vec<Line> = Vec::new();
+            let mut char_idx = 0;
+            let mut cursor_placed = false;
+            
+            for line_str in body_str.split('\n') {
+                let line_chars: Vec<char> = line_str.chars().collect();
+                let line_start = char_idx;
+                let line_end = char_idx + line_chars.len();
+                
+                if !cursor_placed && pos >= line_start && pos <= line_end {
+                    cursor_placed = true;
+                    let pos_in_line = pos - line_start;
+                    let before: String = line_chars[..pos_in_line].iter().collect();
+                    let cursor_char = line_chars.get(pos_in_line).copied().unwrap_or(' ');
+                    let after: String = line_chars.get(pos_in_line + 1..).map(|c| c.iter().collect()).unwrap_or_default();
+                    
+                    result_lines.push(Line::from(vec![
+                        Span::raw(before),
+                        Span::styled(cursor_char.to_string(), cursor_style),
+                        Span::raw(after),
+                    ]));
+                } else {
+                    result_lines.push(Line::from(line_str.to_string()));
+                }
+                
+                char_idx = line_end + 1; // +1 for the newline
+            }
+            
+            if result_lines.is_empty() {
+                result_lines.push(Line::from(vec![Span::styled(" ", cursor_style)]));
+            }
+            
+            Text::from(result_lines)
+        } else {
+            Text::from(self.compose.body.as_str())
+        };
+        
+        let body_input = Paragraph::new(body_text)
+            .block(Block::default().borders(Borders::ALL).border_style(body_style).title(" Message "));
         frame.render_widget(body_input, chunks[2]);
 
         // Reply chain
