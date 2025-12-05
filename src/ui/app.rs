@@ -236,6 +236,20 @@ pub struct RemindState {
     pub cursor: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum SelectionDirection {
+    #[default]
+    None,
+    Down,
+    Up,
+}
+
+#[derive(Debug, Default)]
+pub struct SelectionState {
+    pub direction: SelectionDirection,
+    pub anchor: Option<usize>, // Index where selection started
+}
+
 // ============================================================================
 // App State
 // ============================================================================
@@ -256,6 +270,7 @@ pub struct App {
     pub theme: Theme,
     pub starred: std::collections::HashSet<u32>,
     pub selected: std::collections::HashSet<u32>,
+    pub selection_state: SelectionState,
     pub importance_filter: ImportanceFilter,
 }
 
@@ -280,6 +295,7 @@ impl App {
             theme: Theme::default(),
             starred: std::collections::HashSet::new(),
             selected: std::collections::HashSet::new(),
+            selection_state: SelectionState::default(),
             importance_filter: ImportanceFilter::default(),
         }
     }
@@ -352,25 +368,62 @@ impl App {
 
     pub fn clear_selection(&mut self) {
         self.selected.clear();
+        self.selection_state = SelectionState::default();
     }
 
     pub fn select_next_with_selection(&mut self) {
-        if let Some(email) = self.selected_email() {
-            self.selected.insert(email.uid);
+        // Set anchor on first selection
+        if self.selection_state.anchor.is_none() {
+            self.selection_state.anchor = self.list_state.selected();
         }
+
+        let prev_selected = self.list_state.selected();
         self.select_next();
-        if let Some(email) = self.selected_email() {
-            self.selected.insert(email.uid);
+        let curr_selected = self.list_state.selected();
+
+        // If direction was Up, we're now going Down, so deselect back to anchor
+        if self.selection_state.direction == SelectionDirection::Up {
+            if let Some(prev) = prev_selected {
+                if let Some(email) = self.emails.get(prev) {
+                    self.selected.remove(&email.uid);
+                }
+            }
+        } else {
+            // Direction is None or Down, select forward
+            self.selection_state.direction = SelectionDirection::Down;
+            if let Some(curr) = curr_selected {
+                if let Some(email) = self.emails.get(curr) {
+                    self.selected.insert(email.uid);
+                }
+            }
         }
     }
 
     pub fn select_previous_with_selection(&mut self) {
-        if let Some(email) = self.selected_email() {
-            self.selected.insert(email.uid);
+        // Set anchor on first selection
+        if self.selection_state.anchor.is_none() {
+            self.selection_state.anchor = self.list_state.selected();
         }
+
+        let prev_selected = self.list_state.selected();
         self.select_previous();
-        if let Some(email) = self.selected_email() {
-            self.selected.insert(email.uid);
+        let curr_selected = self.list_state.selected();
+
+        // If direction was Down, we're now going Up, so deselect back to anchor
+        if self.selection_state.direction == SelectionDirection::Down {
+            if let Some(prev) = prev_selected {
+                if let Some(email) = self.emails.get(prev) {
+                    self.selected.remove(&email.uid);
+                }
+            }
+        } else {
+            // Direction is None or Up, select backward
+            self.selection_state.direction = SelectionDirection::Up;
+            if let Some(curr) = curr_selected {
+                if let Some(email) = self.emails.get(curr) {
+                    self.selected.insert(email.uid);
+                }
+            }
         }
     }
 
@@ -779,7 +832,12 @@ impl App {
         let main_area = area.inner(Margin::new(1, 0));
         
         match self.view {
-            View::Inbox => self.render_inbox(frame, main_area),
+            View::Inbox => {
+                self.render_inbox(frame, main_area);
+                if self.pending_command == Some('g') {
+                    self.render_go_menu(frame);
+                }
+            }
             View::EmailView => self.render_email_view(frame, main_area),
             View::Compose => self.render_compose(frame, main_area),
             View::Search => self.render_search(frame, main_area),
@@ -1193,31 +1251,31 @@ impl App {
         let help_text = vec![
             Line::from(Span::styled("Keyboard Shortcuts", self.theme.accent().add_modifier(Modifier::BOLD))),
             Line::from(""),
-            Line::from(vec![Span::styled("j/k       ", self.theme.accent()), Span::raw("Navigate")]),
+            Line::from(Span::styled("Inbox View:", self.theme.text_dim())),
+            Line::from(vec![Span::styled("j/k       ", self.theme.accent()), Span::raw("Navigate emails")]),
             Line::from(vec![Span::styled("Enter/l   ", self.theme.accent()), Span::raw("Open email")]),
-            Line::from(vec![Span::styled("q/Esc     ", self.theme.accent()), Span::raw("Go back / Quit")]),
+            Line::from(vec![Span::styled("J/K       ", self.theme.accent()), Span::raw("Select multiple")]),
             Line::from(""),
+            Line::from(Span::styled("Email View:", self.theme.text_dim())),
+            Line::from(vec![Span::styled("j/k       ", self.theme.accent()), Span::raw("Next/previous email")]),
+            Line::from(vec![Span::styled("Space     ", self.theme.accent()), Span::raw("Scroll down")]),
+            Line::from(vec![Span::styled("Shift+Spc ", self.theme.accent()), Span::raw("Scroll up")]),
+            Line::from(""),
+            Line::from(Span::styled("All Views:", self.theme.text_dim())),
             Line::from(vec![Span::styled("c         ", self.theme.accent()), Span::raw("Compose")]),
             Line::from(vec![Span::styled("r         ", self.theme.accent()), Span::raw("Reply")]),
             Line::from(vec![Span::styled("a         ", self.theme.accent()), Span::raw("Reply all")]),
             Line::from(vec![Span::styled("f         ", self.theme.accent()), Span::raw("Forward")]),
-            Line::from(""),
             Line::from(vec![Span::styled("e         ", self.theme.accent()), Span::raw("Archive / Edit draft")]),
             Line::from(vec![Span::styled("d         ", self.theme.accent()), Span::raw("Delete")]),
             Line::from(vec![Span::styled("s         ", self.theme.accent()), Span::raw("Star/unstar")]),
-            Line::from(vec![Span::styled("h         ", self.theme.accent()), Span::raw("Remind (in email)")]),
-            Line::from(""),
+            Line::from(vec![Span::styled("h         ", self.theme.accent()), Span::raw("Remind email")]),
             Line::from(vec![Span::styled("/         ", self.theme.accent()), Span::raw("Search")]),
             Line::from(vec![Span::styled(":         ", self.theme.accent()), Span::raw("Command palette")]),
             Line::from(vec![Span::styled("R         ", self.theme.accent()), Span::raw("Refresh")]),
-            Line::from(""),
-            Line::from(vec![Span::styled("gi        ", self.theme.accent()), Span::raw("Go to Inbox")]),
-            Line::from(vec![Span::styled("gt        ", self.theme.accent()), Span::raw("Go to Sent")]),
-            Line::from(vec![Span::styled("gd        ", self.theme.accent()), Span::raw("Go to Drafts")]),
-            Line::from(vec![Span::styled("ge        ", self.theme.accent()), Span::raw("Go to Trash")]),
-            Line::from(vec![Span::styled("ga        ", self.theme.accent()), Span::raw("Go to Archive")]),
-            Line::from(""),
+            Line::from(vec![Span::styled("gi/gt/gd/ge/ga", self.theme.accent()), Span::raw("Go to folders")]),
             Line::from(vec![Span::styled("Ctrl+s    ", self.theme.accent()), Span::raw("Send (in compose)")]),
+            Line::from(vec![Span::styled("q/Esc     ", self.theme.accent()), Span::raw("Go back / Quit")]),
         ];
 
         let help = Paragraph::new(help_text)
@@ -1271,6 +1329,43 @@ impl App {
         let help = Paragraph::new(help_text)
             .style(Style::default().bg(self.theme.bg));
         frame.render_widget(help, chunks[1]);
+    }
+
+    fn render_go_menu(&self, frame: &mut Frame) {
+        let area = frame.area();
+        let width = 30u16;
+        let height = 9u16;
+        
+        let popup = Rect::new(
+            (area.width - width) / 2,
+            area.height / 3,
+            width,
+            height,
+        );
+
+        frame.render_widget(Clear, popup);
+        
+        let menu_text = vec![
+            Line::from(Span::styled("Go to:", self.theme.accent().add_modifier(Modifier::BOLD))),
+            Line::from(""),
+            Line::from(vec![Span::styled("g ", self.theme.accent()), Span::raw("Top of inbox")]),
+            Line::from(vec![Span::styled("i ", self.theme.accent()), Span::raw("Inbox")]),
+            Line::from(vec![Span::styled("t ", self.theme.accent()), Span::raw("Sent")]),
+            Line::from(vec![Span::styled("d ", self.theme.accent()), Span::raw("Drafts")]),
+            Line::from(vec![Span::styled("e ", self.theme.accent()), Span::raw("Trash")]),
+            Line::from(vec![Span::styled("a ", self.theme.accent()), Span::raw("Archive")]),
+        ];
+        
+        let menu = Paragraph::new(menu_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(self.theme.border())
+                    .padding(Padding::new(1, 1, 0, 0))
+            )
+            .style(Style::default().bg(self.theme.bg));
+
+        frame.render_widget(menu, popup);
     }
 
     fn render_status_bar(&self, frame: &mut Frame, area: Rect) {

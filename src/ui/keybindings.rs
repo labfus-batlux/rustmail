@@ -33,6 +33,10 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, view_height: u16) -> Actio
 fn handle_inbox_keys(app: &mut App, key: KeyEvent) -> Action {
     // Handle pending 'g' commands
     if let Some(pending) = app.pending_command {
+        if key.code == KeyCode::Esc {
+            app.pending_command = None;
+            return Action::None;
+        }
         app.pending_command = None;
         match (pending, key.code) {
             ('g', KeyCode::Char('g')) => {
@@ -147,6 +151,15 @@ fn handle_inbox_keys(app: &mut App, key: KeyEvent) -> Action {
             Action::None
         }
         
+        // Remind
+        KeyCode::Char('h') => {
+            if app.selected_email().is_some() {
+                app.remind = Default::default();
+                app.view = View::Remind;
+            }
+            Action::None
+        }
+        
         // Importance filter
         KeyCode::Char('I') => {
             app.cycle_importance_filter();
@@ -184,7 +197,19 @@ fn handle_inbox_keys(app: &mut App, key: KeyEvent) -> Action {
 
 fn handle_email_view_keys(app: &mut App, key: KeyEvent, view_height: u16) -> Action {
     match (key.modifiers, key.code) {
-        // Scrolling
+        // Navigation between emails
+        (_, KeyCode::Char('j')) | (_, KeyCode::Down) => {
+            app.select_next();
+            app.scroll_offset = 0;
+            Action::None
+        }
+        (_, KeyCode::Char('k')) | (_, KeyCode::Up) => {
+            app.select_previous();
+            app.scroll_offset = 0;
+            Action::None
+        }
+        
+        // Scrolling within email
         (KeyModifiers::CONTROL, KeyCode::Char('d')) => {
             app.half_page_down(view_height);
             Action::None
@@ -193,16 +218,12 @@ fn handle_email_view_keys(app: &mut App, key: KeyEvent, view_height: u16) -> Act
             app.half_page_up(view_height);
             Action::None
         }
-        (_, KeyCode::Char('j')) | (_, KeyCode::Down) => {
-            app.scroll_down();
-            Action::None
-        }
-        (_, KeyCode::Char('k')) | (_, KeyCode::Up) => {
-            app.scroll_up();
-            Action::None
-        }
         (_, KeyCode::Char(' ')) => {
             app.half_page_down(view_height);
+            Action::None
+        }
+        (KeyModifiers::SHIFT, KeyCode::Char(' ')) => {
+            app.half_page_up(view_height);
             Action::None
         }
         
@@ -233,15 +254,6 @@ fn handle_email_view_keys(app: &mut App, key: KeyEvent, view_height: u16) -> Act
         (_, KeyCode::Char('d')) => Action::DeleteEmail,
         (_, KeyCode::Char('s')) => {
             app.toggle_star();
-            Action::None
-        }
-        
-        // Remind
-        (_, KeyCode::Char('h')) => {
-            if app.selected_email().is_some() {
-                app.remind = Default::default();
-                app.view = View::Remind;
-            }
             Action::None
         }
         
@@ -670,7 +682,7 @@ fn handle_help_keys(app: &mut App, key: KeyEvent) -> Action {
 fn handle_remind_keys(app: &mut App, key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Esc => {
-            app.view = View::EmailView;
+            app.view = View::Inbox;
             Action::None
         }
         KeyCode::Enter => {
@@ -678,7 +690,7 @@ fn handle_remind_keys(app: &mut App, key: KeyEvent) -> Action {
                 let uid = email.uid;
                 let duration_str = app.remind.input.trim().to_string();
                 app.remind = Default::default();
-                app.view = View::EmailView;
+                app.view = View::Inbox;
                 Action::RemindEmail(uid, duration_str)
             } else {
                 Action::None
