@@ -277,6 +277,22 @@ impl ImapClient {
         Ok(emails)
     }
 
+    pub fn save_draft(&mut self, from: &str, to: &str, cc: &str, subject: &str, body: &str) -> Result<()> {
+        // Convert message to string format for IMAP
+        let email_bytes = format!(
+            "From: {}\r\nTo: {}\r\n{}\r\nSubject: {}\r\nContent-Type: text/plain; charset=\"UTF-8\"\r\n\r\n{}",
+            from,
+            to,
+            if cc.is_empty() { String::new() } else { format!("Cc: {}\r\n", cc) },
+            subject,
+            body
+        );
+        
+        // Append to Drafts folder
+        self.session.append("[Gmail]/Drafts", email_bytes.as_bytes())?;
+        Ok(())
+    }
+
     pub fn logout(mut self) -> Result<()> {
         self.session.logout()?;
         Ok(())
@@ -286,6 +302,7 @@ impl ImapClient {
 pub fn send_email(
     from: &str,
     to: &str,
+    cc: &str,
     subject: &str,
     body: &str,
     access_token: &str,
@@ -305,6 +322,11 @@ pub fn send_email(
         .from(from.parse()?)
         .to(to.parse()?)
         .subject(subject);
+    
+    // Add CC if provided
+    if !cc.is_empty() {
+        builder = builder.cc(cc.parse()?);
+    }
 
     if let Some(reply_to) = in_reply_to {
         let msg_id: String = reply_to.parse().unwrap();

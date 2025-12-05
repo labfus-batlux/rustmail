@@ -23,6 +23,7 @@ pub enum View {
     Help,
     Search,
     Command,
+    Remind,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +70,7 @@ impl Folder {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ComposeField {
     To,
+    Cc,
     Subject,
     Body,
 }
@@ -125,6 +127,7 @@ pub struct EmailInChain {
 #[derive(Debug)]
 pub struct ComposeState {
     pub to: String,
+    pub cc: String,
     pub subject: String,
     pub body: String,
     pub active_field: ComposeField,
@@ -142,6 +145,7 @@ impl Default for ComposeState {
     fn default() -> Self {
         Self {
             to: String::new(),
+            cc: String::new(),
             subject: String::new(),
             body: String::new(),
             active_field: ComposeField::To,
@@ -226,6 +230,12 @@ pub struct Notification {
     pub is_error: bool,
 }
 
+#[derive(Debug, Default)]
+pub struct RemindState {
+    pub input: String,
+    pub cursor: usize,
+}
+
 // ============================================================================
 // App State
 // ============================================================================
@@ -242,6 +252,7 @@ pub struct App {
     pub current_folder: Folder,
     pub search: SearchState,
     pub command: CommandState,
+    pub remind: RemindState,
     pub theme: Theme,
     pub starred: std::collections::HashSet<u32>,
     pub selected: std::collections::HashSet<u32>,
@@ -265,6 +276,7 @@ impl App {
             current_folder: Folder::Inbox,
             search: SearchState::default(),
             command: CommandState::default(),
+            remind: RemindState::default(),
             theme: Theme::default(),
             starred: std::collections::HashSet::new(),
             selected: std::collections::HashSet::new(),
@@ -428,10 +440,26 @@ impl App {
         }
     }
 
+    pub fn edit_draft(&mut self) {
+        if let Some(email) = self.selected_email().cloned() {
+            let mut compose = ComposeState::default();
+            // Extract To and CC from the email (if available in parsed headers)
+            compose.to = email.from_address.clone();
+            compose.subject = email.subject.clone();
+            compose.body = email.body.clone();
+            compose.mode = ComposeMode::New;
+            compose.active_field = ComposeField::To;
+            compose.edit_mode = EditMode::Insert;
+            self.compose = compose;
+            self.view = View::Compose;
+        }
+    }
+
     // Cursor and editing methods
     pub fn get_current_field(&self) -> &str {
         match self.compose.active_field {
             ComposeField::To => &self.compose.to,
+            ComposeField::Cc => &self.compose.cc,
             ComposeField::Subject => &self.compose.subject,
             ComposeField::Body => &self.compose.body,
         }
@@ -440,6 +468,7 @@ impl App {
     pub fn get_current_field_mut(&mut self) -> &mut String {
         match self.compose.active_field {
             ComposeField::To => &mut self.compose.to,
+            ComposeField::Cc => &mut self.compose.cc,
             ComposeField::Subject => &mut self.compose.subject,
             ComposeField::Body => &mut self.compose.body,
         }
@@ -762,6 +791,10 @@ impl App {
                 self.render_inbox(frame, main_area);
                 self.render_help(frame);
             }
+            View::Remind => {
+                self.render_inbox(frame, main_area);
+                self.render_remind_popup(frame);
+            }
         }
 
         self.render_status_bar(frame, area);
@@ -909,11 +942,13 @@ impl App {
             vec![
                 Constraint::Length(3),
                 Constraint::Length(3),
+                Constraint::Length(3),
                 Constraint::Min(10),
                 Constraint::Min(5),
             ]
         } else {
             vec![
+                Constraint::Length(3),
                 Constraint::Length(3),
                 Constraint::Length(3),
                 Constraint::Min(10),
@@ -957,13 +992,21 @@ impl App {
             .block(Block::default().borders(Borders::ALL).border_style(to_style).title(" To "));
         frame.render_widget(to_input, chunks[0]);
 
+        // CC field
+        let cc_active = self.compose.active_field == ComposeField::Cc;
+        let cc_style = if cc_active { self.theme.accent() } else { self.theme.border() };
+        let cc_content = render_field(&self.compose.cc, self.compose.cursor_pos, cc_active);
+        let cc_input = Paragraph::new(Line::from(cc_content))
+            .block(Block::default().borders(Borders::ALL).border_style(cc_style).title(" Cc "));
+        frame.render_widget(cc_input, chunks[1]);
+
         // Subject field
         let subj_active = self.compose.active_field == ComposeField::Subject;
         let subj_style = if subj_active { self.theme.accent() } else { self.theme.border() };
         let subj_content = render_field(&self.compose.subject, self.compose.cursor_pos, subj_active);
         let subj_input = Paragraph::new(Line::from(subj_content))
             .block(Block::default().borders(Borders::ALL).border_style(subj_style).title(" Subject "));
-        frame.render_widget(subj_input, chunks[1]);
+        frame.render_widget(subj_input, chunks[2]);
 
         // Body field
         let body_active = self.compose.active_field == ComposeField::Body;
@@ -1015,7 +1058,7 @@ impl App {
         
         let body_input = Paragraph::new(body_text)
             .block(Block::default().borders(Borders::ALL).border_style(body_style).title(" Message "));
-        frame.render_widget(body_input, chunks[2]);
+        frame.render_widget(body_input, chunks[3]);
 
         // Reply chain
         if has_chain {
@@ -1036,7 +1079,7 @@ impl App {
                 .block(Block::default().borders(Borders::ALL).border_style(self.theme.border()).title(" Thread "))
                 .wrap(Wrap { trim: false })
                 .scroll((self.compose.chain_scroll, 0));
-            frame.render_widget(chain, chunks[3]);
+            frame.render_widget(chain, chunks[4]);
         }
     }
 
@@ -1159,9 +1202,10 @@ impl App {
             Line::from(vec![Span::styled("a         ", self.theme.accent()), Span::raw("Reply all")]),
             Line::from(vec![Span::styled("f         ", self.theme.accent()), Span::raw("Forward")]),
             Line::from(""),
-            Line::from(vec![Span::styled("e         ", self.theme.accent()), Span::raw("Archive")]),
+            Line::from(vec![Span::styled("e         ", self.theme.accent()), Span::raw("Archive / Edit draft")]),
             Line::from(vec![Span::styled("d         ", self.theme.accent()), Span::raw("Delete")]),
             Line::from(vec![Span::styled("s         ", self.theme.accent()), Span::raw("Star/unstar")]),
+            Line::from(vec![Span::styled("h         ", self.theme.accent()), Span::raw("Remind (in email)")]),
             Line::from(""),
             Line::from(vec![Span::styled("/         ", self.theme.accent()), Span::raw("Search")]),
             Line::from(vec![Span::styled(":         ", self.theme.accent()), Span::raw("Command palette")]),
@@ -1188,6 +1232,45 @@ impl App {
             .style(Style::default().bg(self.theme.bg));
 
         frame.render_widget(help, popup);
+    }
+
+    fn render_remind_popup(&self, frame: &mut Frame) {
+        let area = frame.area();
+        let width = 50u16;
+        let height = 7u16;
+        
+        let popup = Rect::new(
+            (area.width - width) / 2,
+            area.height / 3,
+            width,
+            height,
+        );
+
+        frame.render_widget(Clear, popup);
+        
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(3), Constraint::Min(0)])
+            .split(popup);
+        
+        let input = Paragraph::new(self.remind.input.as_str())
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(self.theme.accent())
+                    .title(" When? ")
+            )
+            .style(Style::default().bg(self.theme.bg));
+        frame.render_widget(input, chunks[0]);
+
+        let help_text = vec![
+            Line::from(Span::styled("Examples:", self.theme.text_dim())),
+            Line::from("1 hour   1 day   2 weeks"),
+        ];
+        
+        let help = Paragraph::new(help_text)
+            .style(Style::default().bg(self.theme.bg));
+        frame.render_widget(help, chunks[1]);
     }
 
     fn render_status_bar(&self, frame: &mut Frame, area: Rect) {

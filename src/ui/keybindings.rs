@@ -5,11 +5,14 @@ pub enum Action {
     None,
     Refresh,
     SendEmail,
+    SaveDraft,
+    EditDraft,
     DeleteEmail,
     ArchiveEmail,
     MarkAsRead(u32),
     ChangeFolder(Folder),
     FetchThread,
+    RemindEmail(u32, String),
 }
 
 pub fn handle_key_event(app: &mut App, key: KeyEvent, view_height: u16) -> Action {
@@ -23,6 +26,7 @@ pub fn handle_key_event(app: &mut App, key: KeyEvent, view_height: u16) -> Actio
         View::Help => handle_help_keys(app, key),
         View::Search => handle_search_keys(app, key),
         View::Command => handle_command_keys(app, key),
+        View::Remind => handle_remind_keys(app, key),
     }
 }
 
@@ -217,15 +221,32 @@ fn handle_email_view_keys(app: &mut App, key: KeyEvent, view_height: u16) -> Act
         }
         
         // Actions
-        (_, KeyCode::Char('e')) => Action::ArchiveEmail,
+        (_, KeyCode::Char('e')) => {
+            // In drafts folder, 'e' edits the draft
+            // In other folders, 'e' archives
+            if app.current_folder == Folder::Drafts {
+                Action::EditDraft
+            } else {
+                Action::ArchiveEmail
+            }
+        }
         (_, KeyCode::Char('d')) => Action::DeleteEmail,
         (_, KeyCode::Char('s')) => {
             app.toggle_star();
             Action::None
         }
         
+        // Remind
+        (_, KeyCode::Char('h')) => {
+            if app.selected_email().is_some() {
+                app.remind = Default::default();
+                app.view = View::Remind;
+            }
+            Action::None
+        }
+        
         // Go back
-        (_, KeyCode::Char('q')) | (_, KeyCode::Char('h')) | (_, KeyCode::Esc) | (_, KeyCode::Left) => {
+        (_, KeyCode::Char('q')) | (_, KeyCode::Esc) | (_, KeyCode::Left) => {
             app.view = View::Inbox;
             app.scroll_offset = 0;
             Action::None
@@ -377,7 +398,8 @@ fn handle_compose_insert(app: &mut App, key: KeyEvent) -> Action {
         }
         KeyCode::Tab => {
             app.compose.active_field = match app.compose.active_field {
-                ComposeField::To => ComposeField::Subject,
+                ComposeField::To => ComposeField::Cc,
+                ComposeField::Cc => ComposeField::Subject,
                 ComposeField::Subject => ComposeField::Body,
                 ComposeField::Body => ComposeField::To,
             };
@@ -393,7 +415,8 @@ fn handle_compose_insert(app: &mut App, key: KeyEvent) -> Action {
                 app.insert_char('\n');
             } else {
                 app.compose.active_field = match app.compose.active_field {
-                    ComposeField::To => ComposeField::Subject,
+                    ComposeField::To => ComposeField::Cc,
+                    ComposeField::Cc => ComposeField::Subject,
                     ComposeField::Subject => ComposeField::Body,
                     ComposeField::Body => ComposeField::Body,
                 };
@@ -581,7 +604,8 @@ fn handle_compose_normal(app: &mut App, key: KeyEvent) -> Action {
         // Field navigation
         KeyCode::Char('j') | KeyCode::Down => {
             app.compose.active_field = match app.compose.active_field {
-                ComposeField::To => ComposeField::Subject,
+                ComposeField::To => ComposeField::Cc,
+                ComposeField::Cc => ComposeField::Subject,
                 ComposeField::Subject => ComposeField::Body,
                 ComposeField::Body => ComposeField::Body,
             };
@@ -592,7 +616,8 @@ fn handle_compose_normal(app: &mut App, key: KeyEvent) -> Action {
         KeyCode::Char('k') | KeyCode::Up => {
             app.compose.active_field = match app.compose.active_field {
                 ComposeField::To => ComposeField::To,
-                ComposeField::Subject => ComposeField::To,
+                ComposeField::Cc => ComposeField::To,
+                ComposeField::Subject => ComposeField::Cc,
                 ComposeField::Body => ComposeField::Subject,
             };
             app.sync_cursor_to_field();
@@ -610,7 +635,17 @@ fn handle_compose_normal(app: &mut App, key: KeyEvent) -> Action {
             if pending_op != VimOperator::None || app.compose.vim.count.is_some() {
                 app.reset_vim_state();
             } else {
-                app.view = View::Inbox;
+                // Check if compose has content to save as draft
+                let has_content = !app.compose.to.is_empty()
+                    || !app.compose.cc.is_empty()
+                    || !app.compose.subject.is_empty()
+                    || !app.compose.body.is_empty();
+                
+                if has_content {
+                    return Action::SaveDraft;
+                } else {
+                    app.view = View::Inbox;
+                }
             }
             Action::None
         }
@@ -626,6 +661,39 @@ fn handle_help_keys(app: &mut App, key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('?') | KeyCode::Esc | KeyCode::Char('q') => {
             app.view = View::Inbox;
+            Action::None
+        }
+        _ => Action::None,
+    }
+}
+
+fn handle_remind_keys(app: &mut App, key: KeyEvent) -> Action {
+    match key.code {
+        KeyCode::Esc => {
+            app.view = View::EmailView;
+            Action::None
+        }
+        KeyCode::Enter => {
+            if let Some(email) = app.selected_email() {
+                let uid = email.uid;
+                let duration_str = app.remind.input.trim().to_string();
+                app.remind = Default::default();
+                app.view = View::EmailView;
+                Action::RemindEmail(uid, duration_str)
+            } else {
+                Action::None
+            }
+        }
+        KeyCode::Backspace => {
+            app.remind.input.pop();
+            if app.remind.cursor > 0 {
+                app.remind.cursor -= 1;
+            }
+            Action::None
+        }
+        KeyCode::Char(c) => {
+            app.remind.input.push(c);
+            app.remind.cursor += 1;
             Action::None
         }
         _ => Action::None,

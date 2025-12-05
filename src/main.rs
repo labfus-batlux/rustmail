@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod email;
 mod ui;
+mod reminders;
 
 use anyhow::Result;
 use crossterm::{
@@ -16,6 +17,7 @@ use auth::GoogleAuth;
 use config::Config;
 use email::ImapClient;
 use ui::{handle_key_event, App};
+use reminders::RemindersFile;
 
 fn main() -> Result<()> {
     let mut config = match Config::load() {
@@ -74,7 +76,8 @@ fn main() -> Result<()> {
     let mut app = App::new();
     app.set_emails(emails);
 
-    let result = run_app(&mut terminal, &mut app, &mut imap_client, &config);
+    let mut reminders = RemindersFile::load().unwrap_or_default();
+    let result = run_app(&mut terminal, &mut app, &mut imap_client, &config, &mut reminders);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -89,6 +92,7 @@ fn run_app(
     app: &mut App,
     imap_client: &mut ImapClient,
     config: &Config,
+    reminders: &mut RemindersFile,
 ) -> Result<()> {
     loop {
         let view_height = terminal.size()?.height.saturating_sub(8);
@@ -139,6 +143,7 @@ fn run_app(
                         match email::send_email(
                             &config.email,
                             &app.compose.to,
+                            &app.compose.cc,
                             &app.compose.subject,
                             &app.compose.body,
                             access_token,
@@ -155,6 +160,34 @@ fn run_app(
                             }
                         }
                     }
+                }
+                ui::keybindings::Action::SaveDraft => {
+                    if app.compose.to.is_empty() && app.compose.cc.is_empty() {
+                        app.notify_error("'To' or 'Cc' field is required");
+                    } else {
+                        app.notify("Saving draft...");
+                        terminal.draw(|f| app.render(f))?;
+
+                        match imap_client.save_draft(
+                            &config.email,
+                            &app.compose.to,
+                            &app.compose.cc,
+                            &app.compose.subject,
+                            &app.compose.body,
+                        ) {
+                            Ok(_) => {
+                                app.notify("Draft saved");
+                                app.view = ui::app::View::Inbox;
+                                app.compose = Default::default();
+                            }
+                            Err(e) => {
+                                app.notify_error(&format!("Draft failed: {}", e));
+                            }
+                        }
+                    }
+                }
+                ui::keybindings::Action::EditDraft => {
+                    app.edit_draft();
                 }
                 ui::keybindings::Action::ArchiveEmail => {
                     let uids: Vec<u32> = if app.selected.is_empty() {
@@ -224,6 +257,28 @@ fn run_app(
                             if let Ok(thread) = imap_client.fetch_thread(&email) {
                                 app.set_reply_chain_from_thread(thread);
                             }
+                        }
+                    }
+                }
+                ui::keybindings::Action::RemindEmail(uid, duration_str) => {
+                    match reminders::calculate_return_time(&duration_str) {
+                        Ok(return_time) => {
+                            reminders.add_reminder(uid, return_time);
+                            if let Err(e) = reminders.save() {
+                                app.notify_error(&format!("Failed to save reminder: {}", e));
+                            } else {
+                                let msg = format!("Email reminded for {}", duration_str);
+                                app.notify(&msg);
+                                // Move email to archive
+                                let _ = imap_client.archive_email(uid);
+                                app.emails.retain(|e| e.uid != uid);
+                                if app.list_state.selected().unwrap_or(0) >= app.emails.len() && !app.emails.is_empty() {
+                                    app.list_state.select(Some(app.emails.len() - 1));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            app.notify_error(&format!("Invalid time format: {}", e));
                         }
                     }
                 }
